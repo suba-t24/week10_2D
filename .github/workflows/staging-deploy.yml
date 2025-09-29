@@ -1,0 +1,35 @@
+name: CD - Deploy to Staging
+
+on:
+  workflow_run:
+    workflows: ["CI - Test, Build, and Push Images (Testing Branch)"]
+    types:
+      - completed
+
+jobs:
+  deploy_staging:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Create Staging AKS Cluster
+        run: |
+          az group create --name staging-rg --location australiaeast
+          az aks create --resource-group staging-rg --name staging-aks --node-count 1 --generate-ssh-keys
+          az aks get-credentials --resource-group staging-rg --name staging-aks
+
+      - name: Deploy Services to Staging
+        run: |
+          kubectl apply -f k8s/
+
+      - name: Destroy Staging Environment
+        if: always()
+        run: |
+          az group delete --name staging-rg --yes --no-wait

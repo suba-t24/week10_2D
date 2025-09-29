@@ -1,0 +1,31 @@
+name: CD - Deploy to Production
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  PROD_RG: ${{ secrets.PROD_AKS_RESOURCE_GROUP }}
+  PROD_AKS: ${{ secrets.PROD_AKS_NAME }}
+
+jobs:
+  deploy_prod:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Connect to Production AKS
+        run: |
+          az aks get-credentials --resource-group $PROD_RG --name $PROD_AKS
+
+      - name: Deploy to Production
+        run: |
+          kubectl apply -f k8s/
