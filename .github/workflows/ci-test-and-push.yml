@@ -73,8 +73,18 @@ jobs:
         working-directory: backend/order_service
         env:
           POSTGRES_HOST: localhost
-          POSTGRES_PORT: 5433
+          POSTGRES_PORT: 5432
           POSTGRES_DB: orders
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        run: pytest tests --maxfail=1 --disable-warnings -q
+      
+      - name: Run customer_service tests
+        working-directory: backend/customer_service
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: 5432
+          POSTGRES_DB: customers
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
         run: pytest tests --maxfail=1 --disable-warnings -q
