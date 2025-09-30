@@ -76,7 +76,7 @@ jobs:
               if [ -n "$BACKEND_IP" ]; then
                 PORT=$(kubectl get svc $SVC -o jsonpath='{.spec.ports[0].port}')
                 echo "$SVC=$BACKEND_IP:$PORT"
-                echo "${BACKEND_SVCS[$SVC]}=http://$BACKEND_IP:$PORT" >> $GITHUB_ENV
+                echo "${BACKEND_SVCS[$SVC]}=http://$BACKEND_IP:$PORT/" >> $GITHUB_ENV
                 break
               fi
               echo "Waiting for $SVC LoadBalancer IP..."
@@ -86,13 +86,14 @@ jobs:
 
       - name: Inject Backend IPs into Frontend main.js
         run: |
-          echo "Injecting backend API URLs into frontend/static/js/main.js"
-          sed -i "s|_PRODUCT_API_URL_|$PRODUCT_API_URL|g" frontend/main.js
-          sed -i "s|_ORDER_API_URL_|$ORDER_API_URL|g" frontend/main.js
-          sed -i "s|_CUSTOMER_API_URL_|$CUSTOMER_API_URL|g" frontend/main.js
+          echo "Injecting backend API URLs into frontend/main.js"
+
+          sed -i "s|_PRODUCT_API_URL_|${PRODUCT_API_URL}|g" frontend/main.js
+          sed -i "s|_ORDER_API_URL_|${ORDER_API_URL}|g" frontend/main.js
+          sed -i "s|_CUSTOMER_API_URL_|${CUSTOMER_API_URL}|g" frontend/main.js
 
           echo "--- Modified main.js content ---"
-          cat frontend/main.js
+          grep "http" frontend/main.js || cat frontend/main.js
           echo "---------------------------------"
 
       - name: Login to ACR
