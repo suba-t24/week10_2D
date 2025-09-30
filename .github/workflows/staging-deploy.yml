@@ -7,34 +7,59 @@ on:
         required: true
       AZURE_CONTAINER_REGISTRY:
         required: true
-      RESOURCE_GROUP:
-        required: true        
       AKS_CLUSTER_STAGING:
-        required: true        
+        required: true
+      RESOURCE_GROUP:
+        required: true
 
 jobs:
   staging:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Login to Azure
+      - name: Log in to Azure
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
+          enable-AzPSSession: true
 
-      - name: Get AKS credentials for staging
+      - name: Set Kubernetes context (get AKS credentials)
         run: |
           az aks get-credentials --resource-group ${{ secrets.RESOURCE_GROUP }} \
                                  --name ${{ secrets.AKS_CLUSTER_STAGING }} \
                                  --overwrite-existing
 
-      - name: Deploy k8s manifests to staging AKS
-        run: kubectl apply -f k8s/
+      - name: Attach ACR
+        run: |
+          az aks update --name ${{ secrets.AKS_CLUSTER_STAGING }} \
+                        --resource-group ${{ secrets.RESOURCE_GROUP }} \
+                        --attach-acr ${{ secrets.AZURE_CONTAINER_REGISTRY }}
 
-      - name: Wait for pods ready (up to 3 minutes)
+      - name: Deploy Backend Infrastructure (DBs, ConfigMaps, Secrets)
+        run: |
+          cd k8s/
+          kubectl apply -f configmaps.yaml
+          kubectl apply -f secrets.yaml
+          kubectl apply -f product-db.yaml
+          kubectl apply -f order-db.yaml
+          kubectl apply -f customer-db.yaml
+
+      - name: Deploy Backend Microservices
+        run: |
+          cd k8s/
+          kubectl apply -f product-service.yaml
+          kubectl apply -f order-service.yaml
+          kubectl apply -f customer-service.yaml
+
+      - name: Deploy Frontend Service
+        run: |
+          cd k8s/
+          kubectl apply -f frontend.yaml
+
+      - name: Wait for all pods to be ready (up to 3 minutes)
         run: |
           for i in $(seq 1 36); do
             NOTREADY=$(kubectl get pods --no-headers | grep -v Running || true)
@@ -51,7 +76,7 @@ jobs:
       - name: Get frontend external IP and run simple acceptance test
         id: acceptance
         run: |
-          FRONT_SVC="frontend-w10e1"
+          FRONT_SVC="frontend"  # Hardcoded frontend service name
 
           for i in $(seq 1 60); do
             IP=$(kubectl get svc $FRONT_SVC -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
