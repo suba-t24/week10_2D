@@ -7,6 +7,8 @@ on:
         required: true
       AZURE_CONTAINER_REGISTRY:
         required: true
+      AZURE_CONTAINER_NAME:
+        required: true
       AKS_CLUSTER_STAGING:
         required: true
       RESOURCE_GROUP:
@@ -36,7 +38,7 @@ jobs:
         run: |
           az aks update --name ${{ secrets.AKS_CLUSTER_STAGING }} \
                         --resource-group ${{ secrets.RESOURCE_GROUP }} \
-                        --attach-acr ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+                        --attach-acr ${{ secrets.AZURE_CONTAINER_NAME }}
 
       - name: Deploy Backend Infrastructure (DBs, ConfigMaps, Secrets)
         run: |
