@@ -94,9 +94,6 @@ jobs:
             exit 1
           fi
           echo "FRONTEND_IP=$IP" >> $GITHUB_ENV
-
-      - name: Simple curl acceptance test
-        run: |
           echo "Testing frontend service..."
           curl -f http://$FRONTEND_IP || echo "Frontend not responding"
 
@@ -119,10 +116,13 @@ jobs:
               kubectl get svc
               exit 1
             fi
-            # Simple health check (adjust endpoint if needed)
-            echo "Testing $SVC service..."
-            curl -f http://$BACKEND_IP/health || echo "$SVC not responding"
+
+            # Get the service port dynamically
+            PORT=$(kubectl get svc $SVC -o jsonpath='{.spec.ports[0].port}')
+            echo "Testing $SVC service at $BACKEND_IP:$PORT..."
+            curl -f http://$BACKEND_IP:$PORT/health || echo "$SVC not responding"
           done
+
 
       - name: Destroy staging environment
         if: always()
