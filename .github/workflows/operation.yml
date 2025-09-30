@@ -1,0 +1,16 @@
+name: Operation
+
+on:
+  push:
+    branches:
+      - testing
+
+jobs:
+  testnpush:
+    uses: ./.github/workflows/ci-test-and-push.yml
+    secrets: inherit
+
+  stage:
+    needs: testnpush
+    uses: ./.github/workflows/staging-deploy.yml
+    secrets: inherit

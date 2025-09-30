@@ -1,12 +1,12 @@
-name: Staging Deploy - create, test, destroy
+name: Staging Deploy
 
 on:
-  workflow_run:
-    workflows: ["CI - Testing Branch"]
-    types:
-      - completed
-    branches:
-      - testing
+  workflow_call:
+    secrets:
+      AZURE_CREDENTIALS:
+        required: true
+      AZURE_CONTAINER_REGISTRY:
+        required: true
 
 jobs:
   staging:

@@ -1,10 +1,13 @@
 name: CI - Testing Branch
 
 on:
-  push:
-    branches:
-      - testing
-
+  workflow_call:
+    secrets:
+      AZURE_CREDENTIALS:
+        required: true
+      AZURE_CONTAINER_REGISTRY:
+        required: true
+        
 env:
   ACR_LOGIN_SERVER: ${{ secrets.AZURE_CONTAINER_REGISTRY }}
   IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}
