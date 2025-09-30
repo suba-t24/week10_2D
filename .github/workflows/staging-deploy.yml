@@ -56,6 +56,51 @@ jobs:
           kubectl apply -f order-service.yaml
           kubectl apply -f customer-service.yaml
 
+      - name: Get Backend LoadBalancer IPs
+        id: backend_ips
+        run: |
+          declare -A BACKEND_SVCS=( 
+            ["product-service-w10e1"]="PRODUCT_API_URL" 
+            ["order-service-w10e1"]="ORDER_API_URL" 
+            ["customer-service-w10e1"]="CUSTOMER_API_URL" 
+          )
+
+          for SVC in "${!BACKEND_SVCS[@]}"; do
+            BACKEND_IP=""
+            for i in $(seq 1 60); do
+              BACKEND_IP=$(kubectl get svc $SVC -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+              if [ -n "$BACKEND_IP" ]; then
+                PORT=$(kubectl get svc $SVC -o jsonpath='{.spec.ports[0].port}')
+                echo "$SVC=$BACKEND_IP:$PORT"
+                echo "${BACKEND_SVCS[$SVC]}=http://$BACKEND_IP:$PORT" >> $GITHUB_ENV
+                break
+              fi
+              echo "Waiting for $SVC LoadBalancer IP..."
+              sleep 5
+            done
+          done
+
+      - name: Inject Backend IPs into Frontend main.js
+        run: |
+          echo "Injecting backend API URLs into frontend/static/js/main.js"
+          sed -i "s|_PRODUCT_API_URL_|$PRODUCT_API_URL|g" frontend/main.js
+          sed -i "s|_ORDER_API_URL_|$ORDER_API_URL|g" frontend/main.js
+          sed -i "s|_CUSTOMER_API_URL_|$CUSTOMER_API_URL|g" frontend/main.js
+
+          echo "--- Modified main.js content ---"
+          cat frontend/main.js
+          echo "---------------------------------"
+
+      - name: Build and Push Frontend Image
+        run: |
+          docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/frontend:latest ./frontend/
+          docker push ${{ secrets.AZURE_CONTAINER_REGISTRY }}/frontend:latest
+
+      - name: Deploy Frontend Service
+        run: |
+          cd k8s/
+          kubectl apply -f frontend.yaml
+
       - name: Deploy Frontend Service
         run: |
           cd k8s/
