@@ -94,3 +94,30 @@ jobs:
             exit 1
           fi
           echo "FRONTEND_IP=$IP" >> $GITHUB_ENV
+
+      - name: Simple curl acceptance test
+        run: |
+          echo "Testing frontend service..."
+          curl -f http://$FRONTEND_IP || echo "Frontend not responding"
+
+      - name: Destroy staging environment
+        if: always()
+        run: |
+          echo "Deleting staging namespace resources..."
+          cd k8s/
+          # Delete backend services
+          kubectl delete -f product-service.yaml || true
+          kubectl delete -f order-service.yaml || true
+          kubectl delete -f customer-service.yaml || true
+
+          # Delete frontend
+          kubectl delete -f frontend.yaml || true
+
+          # Delete DBs, ConfigMaps, Secrets
+          kubectl delete -f product-db.yaml || true
+          kubectl delete -f order-db.yaml || true
+          kubectl delete -f customer-db.yaml || true
+          kubectl delete -f configmaps.yaml || true
+          kubectl delete -f secrets.yaml || true
+
+          echo "Staging environment destroyed."

@@ -5,44 +5,86 @@ on:
     branches:
       - main
 
-env:
-  ACR_LOGIN_SERVER: ${{ secrets.AZURE_CONTAINER_REGISTRY }}
-
 jobs:
-  deploy-prod:
+  prod:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Login to Azure
+      - name: Log in to Azure
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
+          enable-AzPSSession: true
 
-      - name: Get AKS credentials (production)
+      - name: Set Kubernetes context (get AKS credentials)
         run: |
-          az aks get-credentials --resource-group ${{ secrets.RESOURCE_GROUP }} --name ${{ secrets.AKS_CLUSTER_PROD }} --overwrite-existing
+          az aks get-credentials --resource-group ${{ secrets.RESOURCE_GROUP }} \
+                                 --name ${{ secrets.AKS_CLUSTER_PROD }} \
+                                 --overwrite-existing
 
-      - name: Attach ACR to AKS (ensure AKS can pull images)
+      - name: Attach ACR
         run: |
-          az aks update --name ${{ secrets.AKS_CLUSTER_PROD }} --resource-group ${{ secrets.RESOURCE_GROUP }} --attach-acr ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+          az aks update --name ${{ secrets.AKS_CLUSTER_PROD }} \
+                        --resource-group ${{ secrets.RESOURCE_GROUP }} \
+                        --attach-acr ${{ secrets.AZURE_CONTAINER_REGISTRY }}
 
-      - name: Update deployments with latest images
+      - name: Deploy Backend Infrastructure (DBs, ConfigMaps, Secrets)
         run: |
-          # Adjust deployment names / container names if different in your manifests
-          kubectl set image deployment/product-service-w10e1 product-service-container=${{ env.ACR_LOGIN_SERVER }}/product_service:latest --record || true
-          kubectl set image deployment/order-service-w10e1 order-service-container=${{ env.ACR_LOGIN_SERVER }}/order_service:latest --record || true
-          kubectl set image deployment/customer-service-w10e1 customer-service-container=${{ env.ACR_LOGIN_SERVER }}/customer_service:latest --record || true
-          kubectl set image deployment/frontend-service-w10e1 frontend-container=${{ env.ACR_LOGIN_SERVER }}/frontend:latest --record || true
+          cd k8s/
+          kubectl apply -f configmaps.yaml
+          kubectl apply -f secrets.yaml
+          kubectl apply -f product-db.yaml
+          kubectl apply -f order-db.yaml
+          kubectl apply -f customer-db.yaml
 
-      - name: Wait for rollout
+      - name: Deploy Backend Microservices
         run: |
-          kubectl rollout status deployment/product-service-w10e1 --timeout=120s || true
-          kubectl rollout status deployment/order-service-w10e1 --timeout=120s || true
-          kubectl rollout status deployment/customer-service-w10e1 --timeout=120s || true
-          kubectl rollout status deployment/frontend-service-w10e1 --timeout=120s || true
+          cd k8s/
+          kubectl apply -f product-service.yaml
+          kubectl apply -f order-service.yaml
+          kubectl apply -f customer-service.yaml
+
+      - name: Deploy Frontend Service
+        run: |
+          cd k8s/
+          kubectl apply -f frontend.yaml
+
+      - name: Wait for all pods to be ready (up to 3 minutes)
+        run: |
+          for i in $(seq 1 36); do
+            NOTREADY=$(kubectl get pods --no-headers | grep -v Running || true)
+            if [ -z "$NOTREADY" ]; then
+              echo "All pods running"
+              break
+            fi
+            echo "Waiting for pods to be ready..."
+            kubectl get pods --no-headers
+            sleep 5
+          done
+          kubectl get pods -o wide
+
+      - name: Get frontend external IP and simple acceptance check
+        id: acceptance
+        run: |
+          FRONT_SVC="frontend-w10e1"
+          for i in $(seq 1 60); do
+            IP=$(kubectl get svc $FRONT_SVC -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+            if [ -n "$IP" ]; then
+              echo "Frontend IP: $IP"
+              break
+            fi
+            sleep 5
+          done
+
+          if [ -z "$IP" ]; then
+            echo "ERROR: frontend LoadBalancer IP not assigned"
+            kubectl get svc
+            exit 1
+          fi
+          echo "FRONTEND_IP=$IP" >> $GITHUB_ENV
 
       - name: Logout from Azure
         run: az logout
