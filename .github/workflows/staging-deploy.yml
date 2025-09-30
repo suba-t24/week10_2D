@@ -78,14 +78,14 @@ jobs:
       - name: Get frontend external IP and run simple acceptance test
         id: acceptance
         run: |
-          FRONT_SVC="frontend"  # Hardcoded frontend service name
-
+          FRONT_SVC="frontend"
           for i in $(seq 1 60); do
             IP=$(kubectl get svc $FRONT_SVC -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
             if [ -n "$IP" ]; then
               echo "Frontend IP: $IP"
               break
             fi
+            echo "Waiting for frontend LoadBalancer IP..."
             sleep 5
           done
 
