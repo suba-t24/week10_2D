@@ -37,7 +37,7 @@ logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.error").setLevel(logging.INFO)
 
 # --- Service URLs Configuration ---
-CUSTOMER_SERVICE_URL = os.getenv("CUSTOMER_SERVICE_URL", "http://localhost:8002")
+CUSTOMER_SERVICE_URL = os.getenv("CUSTOMER_SERVICE_URL", "http://customer-service-w10e1:8002")
 logger.info(
     f"Order Service: Configured to communicate with Customer Service at: {CUSTOMER_SERVICE_URL}"
 )

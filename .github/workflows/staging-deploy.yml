@@ -1,35 +1,93 @@
-name: CD - Deploy to Staging
+name: Staging Deploy - create, test, destroy
 
 on:
   workflow_run:
-    workflows: ["CI - Test, Build, and Push Images (Testing Branch)"]
-    types:
-      - completed
+    workflows: ["CI - Test, Build and Push Images (Testing Branch)"]
+    types: [ completed ]
 
 jobs:
-  deploy_staging:
+  staging:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Azure Login
+      - name: Login to Azure
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Create Staging AKS Cluster
+      - name: Create staging resource group and AKS cluster
+        id: create_aks
         run: |
-          az group create --name staging-rg --location australiaeast
-          az aks create --resource-group staging-rg --name staging-aks --node-count 1 --generate-ssh-keys
-          az aks get-credentials --resource-group staging-rg --name staging-aks
+          set -e
+          RG="staging-rg-${{ github.run_id }}"
+          AKS="staging-aks-${{ github.run_id }}"
+          echo "RESOURCE_GROUP=$RG" >> $GITHUB_ENV
+          echo "AKS_NAME=$AKS" >> $GITHUB_ENV
 
-      - name: Deploy Services to Staging
+          echo "Creating resource group $RG..."
+          az group create -n $RG -l australiaeast
+
+          echo "Creating AKS cluster $AKS (this may take several minutes)..."
+          az aks create -g $RG -n $AKS --node-count 1 --node-vm-size Standard_B2s --generate-ssh-keys --yes
+
+          echo "Attaching ACR to AKS..."
+          az aks update --resource-group $RG --name $AKS --attach-acr ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+
+          echo "Getting credentials..."
+          az aks get-credentials --resource-group $RG --name $AKS --overwrite-existing
+
+      - name: Deploy k8s manifests to staging AKS
         run: |
+          set -e
           kubectl apply -f k8s/
 
-      - name: Destroy Staging Environment
+      - name: Wait for pods ready (up to 3 minutes)
+        run: |
+          set -e
+          for i in $(seq 1 36); do
+            NOTREADY=$(kubectl get pods --no-headers | grep -v Running || true)
+            if [ -z "$NOTREADY" ]; then
+              echo "All pods running"
+              break
+            fi
+            echo "Waiting for pods to be ready..."
+            kubectl get pods --no-headers
+            sleep 5
+          done
+          kubectl get pods -o wide
+
+      - name: Get frontend external IP and run simple acceptance test
+        id: acceptance
+        run: |
+          set -e
+          # Update service name if your frontend service metadata.name differs
+          FRONT_SVC="frontend-service-w10e1"
+          # Try to get IP up to 60 times
+          for i in $(seq 1 60); do
+            IP=$(kubectl get svc $FRONT_SVC -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+            if [ -n "$IP" ]; then
+              echo "Frontend IP: $IP"
+              break
+            fi
+            sleep 5
+          done
+          if [ -z "$IP" ]; then
+            echo "ERROR: frontend LoadBalancer IP not assigned"
+            kubectl get svc
+            exit 1
+          fi
+          echo "FRONTEND_IP=$IP" >> $GITHUB_ENV
+          echo "Waiting 10s for service to respond..."
+          sleep 10
+          echo "HTTP check:"
+          curl -sSf --max-time 10 "http://$IP" || (echo "HTTP check failed"; exit 1)
+
+      - name: Cleanup staging resources (destroy resource group)
         if: always()
         run: |
-          az group delete --name staging-rg --yes --no-wait
+          set -e
+          az group delete --name $RESOURCE_GROUP --yes --no-wait

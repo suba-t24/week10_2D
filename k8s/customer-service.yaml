@@ -16,14 +16,12 @@ spec:
       labels:
         app: customer-service
     spec:
-      imagePullSecrets:
-        - name: acr-secret
       containers:
       - name: customer-service-container
         image: sit722week10acr.azurecr.io/customer_service:latest
         imagePullPolicy: Always
         ports:
-        - containerPort: 8002
+        - containerPort: 8000
         env:
         - name: POSTGRES_HOST
           value: customer-db-service-w10e1
@@ -55,5 +53,5 @@ spec:
   ports:
     - protocol: TCP
       port: 8002
-      targetPort: 8002
+      targetPort: 8000
   type: LoadBalancer

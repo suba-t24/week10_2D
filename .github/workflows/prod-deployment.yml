@@ -1,4 +1,4 @@
-name: CD - Deploy to Production
+name: Prod Deploy - on main
 
 on:
   push:
@@ -6,26 +6,43 @@ on:
       - main
 
 env:
-  PROD_RG: ${{ secrets.PROD_AKS_RESOURCE_GROUP }}
-  PROD_AKS: ${{ secrets.PROD_AKS_NAME }}
+  ACR_LOGIN_SERVER: ${{ secrets.AZURE_CONTAINER_REGISTRY }}
 
 jobs:
-  deploy_prod:
+  deploy-prod:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Azure Login
+      - name: Login to Azure
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Connect to Production AKS
+      - name: Get AKS credentials (production)
         run: |
-          az aks get-credentials --resource-group $PROD_RG --name $PROD_AKS
+          az aks get-credentials --resource-group ${{ secrets.PROD_AKS_RESOURCE_GROUP }} --name ${{ secrets.PROD_AKS_NAME }} --overwrite-existing
 
-      - name: Deploy to Production
+      - name: Attach ACR to AKS (ensure AKS can pull images)
         run: |
-          kubectl apply -f k8s/
+          az aks update --name ${{ secrets.PROD_AKS_NAME }} --resource-group ${{ secrets.PROD_AKS_RESOURCE_GROUP }} --attach-acr ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+
+      - name: Update deployments with latest images
+        run: |
+          # Adjust deployment names / container names if different in your manifests
+          kubectl set image deployment/product-service-w10e1 product-service-container=${{ env.ACR_LOGIN_SERVER }}/product_service:latest --record || true
+          kubectl set image deployment/order-service-w10e1 order-service-container=${{ env.ACR_LOGIN_SERVER }}/order_service:latest --record || true
+          kubectl set image deployment/customer-service-w10e1 customer-service-container=${{ env.ACR_LOGIN_SERVER }}/customer_service:latest --record || true
+          kubectl set image deployment/frontend-service-w10e1 frontend-container=${{ env.ACR_LOGIN_SERVER }}/frontend:latest --record || true
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/product-service-w10e1 --timeout=120s || true
+          kubectl rollout status deployment/order-service-w10e1 --timeout=120s || true
+          kubectl rollout status deployment/customer-service-w10e1 --timeout=120s || true
+          kubectl rollout status deployment/frontend-service-w10e1 --timeout=120s || true
+
+      - name: Logout from Azure
+        run: az logout
