@@ -60,7 +60,7 @@ jobs:
           kubectl apply -f order-service.yaml
           kubectl apply -f customer-service.yaml
 
-      - name: Get Backend LoadBalancer IPs
+      - name: Wait for Backend LoadBalancer IPs and set env
         id: backend_ips
         run: |
           declare -A BACKEND_SVCS=( 
@@ -70,31 +70,31 @@ jobs:
           )
 
           for SVC in "${!BACKEND_SVCS[@]}"; do
-            BACKEND_IP=""
+            echo "Waiting for $SVC external IP..."
             for i in $(seq 1 60); do
               BACKEND_IP=$(kubectl get svc $SVC -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
-              if [ -n "$BACKEND_IP" ]; then
-                PORT=$(kubectl get svc $SVC -o jsonpath='{.spec.ports[0].port}')
-                echo "$SVC=$BACKEND_IP:$PORT"
-                echo "${BACKEND_SVCS[$SVC]}=http://$BACKEND_IP:$PORT/" >> $GITHUB_ENV
+              PORT=$(kubectl get svc $SVC -o jsonpath='{.spec.ports[0].port}' 2>/dev/null || echo "")
+              if [ -n "$BACKEND_IP" ] && [ -n "$PORT" ]; then
+                echo "Found $SVC -> $BACKEND_IP:$PORT"
+                echo "${BACKEND_SVCS[$SVC]}=http://$BACKEND_IP:$PORT" >> $GITHUB_ENV
                 break
               fi
-              echo "Waiting for $SVC LoadBalancer IP..."
+              echo "Retrying $SVC... waiting 5s"
               sleep 5
             done
+
+            if [ -z "$BACKEND_IP" ] || [ -z "$PORT" ]; then
+              echo "ERROR: $SVC LoadBalancer IP or port not assigned"
+              exit 1
+            fi
           done
 
-      - name: Inject Backend IPs into Frontend main.js
+      - name: Inject Backend API URLs into frontend/main.js
         run: |
           echo "Injecting backend API URLs into frontend/main.js"
-
           sed -i "s|_PRODUCT_API_URL_|${PRODUCT_API_URL}|g" frontend/main.js
           sed -i "s|_ORDER_API_URL_|${ORDER_API_URL}|g" frontend/main.js
           sed -i "s|_CUSTOMER_API_URL_|${CUSTOMER_API_URL}|g" frontend/main.js
-
-          echo "--- Modified main.js content ---"
-          grep "http" frontend/main.js || cat frontend/main.js
-          echo "---------------------------------"
 
       - name: Login to ACR
         run: az acr login --name ${{ env.ACR_LOGIN_SERVER }}
@@ -106,12 +106,6 @@ jobs:
           docker push ${{ env.ACR_LOGIN_SERVER }}/frontend:${{ env.IMAGE_TAG }}
           docker push ${{ env.ACR_LOGIN_SERVER }}/frontend:latest
 
-
-      - name: Deploy Frontend Service
-        run: |
-          cd k8s/
-          kubectl apply -f frontend.yaml
-
       - name: Deploy Frontend Service
         run: |
           cd k8s/
@@ -119,16 +113,7 @@ jobs:
 
       - name: Wait for all pods to be ready (up to 3 minutes)
         run: |
-          for i in $(seq 1 36); do
-            NOTREADY=$(kubectl get pods --no-headers | grep -v Running || true)
-            if [ -z "$NOTREADY" ]; then
-              echo "All pods running"
-              break
-            fi
-            echo "Waiting for pods to be ready..."
-            kubectl get pods --no-headers
-            sleep 5
-          done
+          kubectl wait --for=condition=ready pod --all --timeout=180s
           kubectl get pods -o wide
 
       - name: Get frontend external IP and run simple acceptance test
@@ -156,52 +141,57 @@ jobs:
       - name: Backend Services Acceptance Test
         run: |
           declare -A BACKEND_SVCS=( 
-            ["product-service-w10e1"]="product" 
-            ["order-service-w10e1"]="order" 
-            ["customer-service-w10e1"]="customer" 
+            ["product-service-w10e1"]="products" 
+            ["order-service-w10e1"]="orders" 
+            ["customer-service-w10e1"]="customers" 
           )
 
           for SVC in "${!BACKEND_SVCS[@]}"; do
-            BACKEND_IP=""
-            # Wait for LoadBalancer IP
+            echo "Checking $SVC..."
             for i in $(seq 1 60); do
               BACKEND_IP=$(kubectl get svc $SVC -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
-              if [ -n "$BACKEND_IP" ]; then
-                echo "$SVC IP: $BACKEND_IP"
+              PORT=$(kubectl get svc $SVC -o jsonpath='{.spec.ports[0].port}' 2>/dev/null || echo "")
+              if [ -n "$BACKEND_IP" ] && [ -n "$PORT" ]; then
                 break
               fi
               echo "Waiting for $SVC LoadBalancer IP..."
               sleep 5
             done
 
-            if [ -z "$BACKEND_IP" ]; then
+            if [ -z "$BACKEND_IP" ] || [ -z "$PORT" ]; then
               echo "ERROR: $SVC LoadBalancer IP not assigned"
-              kubectl get svc
               exit 1
             fi
 
-            # Get service port dynamically
-            PORT=$(kubectl get svc $SVC -o jsonpath='{.spec.ports[0].port}')
-            echo "Testing $SVC service at $BACKEND_IP:$PORT..."
+            ENDPOINT=http://$BACKEND_IP:$PORT/${BACKEND_SVCS[$SVC]}/
+            echo "Testing $SVC service at $ENDPOINT"
 
-            # Retry loop for health check
+            # Retry loop
             for j in $(seq 1 30); do
-              RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://$BACKEND_IP:$PORT/health || echo "")
+              RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" $ENDPOINT || echo "")
               if [ "$RESPONSE" == "200" ]; then
-                echo "$SVC responded successfully"
+                echo "$SVC responded OK"
                 break
               fi
               echo "Waiting for $SVC to respond..."
               sleep 5
             done
 
-            # Final check
-            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" http://$BACKEND_IP:$PORT/health || echo "")
+            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" $ENDPOINT || echo "")
             if [ "$RESPONSE" != "200" ]; then
-              echo "$SVC not responding after retries"
+              echo "ERROR: $SVC did not respond"
+              exit 1
+            fi
+
+            # Health check
+            HEALTH_URL=http://$BACKEND_IP:$PORT/health
+            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" $HEALTH_URL || echo "")
+            if [ "$RESPONSE" != "200" ]; then
+              echo "ERROR: $SVC health endpoint not OK"
               exit 1
             fi
           done
+
 
       # - name: Destroy staging environment
       #   if: always()
