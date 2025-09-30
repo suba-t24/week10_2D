@@ -7,6 +7,10 @@ on:
         required: true
       AZURE_CONTAINER_REGISTRY:
         required: true
+      RESOURCE_GROUP:
+        required: true        
+      AKS_CLUSTER_STAGING:
+        required: true        
 
 jobs:
   staging:
@@ -21,35 +25,17 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Create staging resource group and AKS cluster
-        id: create_aks
+      - name: Get AKS credentials for staging
         run: |
-          set -e
-          RG="staging-rg-${{ github.run_id }}"
-          AKS="staging-aks-${{ github.run_id }}"
-          echo "RESOURCE_GROUP=$RG" >> $GITHUB_ENV
-          echo "AKS_NAME=$AKS" >> $GITHUB_ENV
-
-          echo "Creating resource group $RG..."
-          az group create -n $RG -l australiaeast
-
-          echo "Creating AKS cluster $AKS (this may take several minutes)..."
-          az aks create -g $RG -n $AKS --node-count 1 --node-vm-size Standard_B2s --generate-ssh-keys --yes
-
-          echo "Attaching ACR to AKS..."
-          az aks update --resource-group $RG --name $AKS --attach-acr ${{ secrets.AZURE_CONTAINER_REGISTRY }}
-
-          echo "Getting credentials..."
-          az aks get-credentials --resource-group $RG --name $AKS --overwrite-existing
+          az aks get-credentials --resource-group ${{ secrets.RESOURCE_GROUP }} \
+                                 --name ${{ secrets.AKS_CLUSTER_STAGING }} \
+                                 --overwrite-existing
 
       - name: Deploy k8s manifests to staging AKS
-        run: |
-          set -e
-          kubectl apply -f k8s/
+        run: kubectl apply -f k8s/
 
       - name: Wait for pods ready (up to 3 minutes)
         run: |
-          set -e
           for i in $(seq 1 36); do
             NOTREADY=$(kubectl get pods --no-headers | grep -v Running || true)
             if [ -z "$NOTREADY" ]; then
@@ -65,10 +51,8 @@ jobs:
       - name: Get frontend external IP and run simple acceptance test
         id: acceptance
         run: |
-          set -e
-          # Update service name if your frontend service metadata.name differs
-          FRONT_SVC="frontend-service-w10e1"
-          # Try to get IP up to 60 times
+          FRONT_SVC="frontend-w10e1"
+
           for i in $(seq 1 60); do
             IP=$(kubectl get svc $FRONT_SVC -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
             if [ -n "$IP" ]; then
@@ -77,19 +61,15 @@ jobs:
             fi
             sleep 5
           done
+
           if [ -z "$IP" ]; then
             echo "ERROR: frontend LoadBalancer IP not assigned"
             kubectl get svc
             exit 1
           fi
+
           echo "FRONTEND_IP=$IP" >> $GITHUB_ENV
           echo "Waiting 10s for service to respond..."
           sleep 10
           echo "HTTP check:"
           curl -sSf --max-time 10 "http://$IP" || (echo "HTTP check failed"; exit 1)
-
-      - name: Cleanup staging resources (destroy resource group)
-        if: always()
-        run: |
-          set -e
-          az group delete --name $RESOURCE_GROUP --yes --no-wait

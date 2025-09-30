@@ -23,11 +23,11 @@ jobs:
 
       - name: Get AKS credentials (production)
         run: |
-          az aks get-credentials --resource-group ${{ secrets.PROD_AKS_RESOURCE_GROUP }} --name ${{ secrets.PROD_AKS_NAME }} --overwrite-existing
+          az aks get-credentials --resource-group ${{ secrets.RESOURCE_GROUP }} --name ${{ secrets.AKS_CLUSTER_PROD }} --overwrite-existing
 
       - name: Attach ACR to AKS (ensure AKS can pull images)
         run: |
-          az aks update --name ${{ secrets.PROD_AKS_NAME }} --resource-group ${{ secrets.PROD_AKS_RESOURCE_GROUP }} --attach-acr ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+          az aks update --name ${{ secrets.AKS_CLUSTER_PROD }} --resource-group ${{ secrets.RESOURCE_GROUP }} --attach-acr ${{ secrets.AZURE_CONTAINER_REGISTRY }}
 
       - name: Update deployments with latest images
         run: |

@@ -1,4 +1,4 @@
-# week08/k8s/product-db.yaml
+# week10/k8s/product-db.yaml
 
 apiVersion: apps/v1
 kind: Deployment

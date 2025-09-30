@@ -1,4 +1,4 @@
-# week08/k8s/order-service.yaml
+# week10/k8s/order-service.yaml
 
 apiVersion: apps/v1
 kind: Deployment

@@ -1,9 +1,9 @@
-# week08/k8s/frontend.yaml
+# week10/k8s/frontend.yaml
 
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: frontend
+  name: frontend-w10e1
   labels:
     app: frontend
 spec:

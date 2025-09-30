@@ -1,4 +1,4 @@
-# week05/k8s/customer-service.yaml
+# week10/k8s/customer-service.yaml
 
 apiVersion: apps/v1
 kind: Deployment
