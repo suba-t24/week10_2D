@@ -1,4 +1,4 @@
-name: CI - Test, Build and Push Images (Testing Branch)
+name: CI - Testing Branch
 
 on:
   push:

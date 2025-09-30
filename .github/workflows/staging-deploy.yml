@@ -2,8 +2,9 @@ name: Staging Deploy - create, test, destroy
 
 on:
   workflow_run:
-    workflows: ["CI - Test, Build and Push Images (Testing Branch)"]
-    types: [ completed ]
+    workflows: ["CI - Testing Branch"]
+    types:
+      - completed
 
 jobs:
   staging:
