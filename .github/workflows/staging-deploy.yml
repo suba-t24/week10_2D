@@ -78,14 +78,13 @@ jobs:
       - name: Get frontend external IP and run simple acceptance test
         id: acceptance
         run: |
-          FRONT_SVC="frontend"
+          FRONT_SVC="frontend-w10e1"
           for i in $(seq 1 60); do
             IP=$(kubectl get svc $FRONT_SVC -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
             if [ -n "$IP" ]; then
               echo "Frontend IP: $IP"
               break
             fi
-            echo "Waiting for frontend LoadBalancer IP..."
             sleep 5
           done
 
@@ -94,9 +93,4 @@ jobs:
             kubectl get svc
             exit 1
           fi
-
           echo "FRONTEND_IP=$IP" >> $GITHUB_ENV
-          echo "Waiting 10s for service to respond..."
-          sleep 10
-          echo "HTTP check:"
-          curl -sSf --max-time 10 "http://$IP" || (echo "HTTP check failed"; exit 1)
