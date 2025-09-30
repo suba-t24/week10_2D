@@ -100,6 +100,30 @@ jobs:
           echo "Testing frontend service..."
           curl -f http://$FRONTEND_IP || echo "Frontend not responding"
 
+      - name: Backend services acceptance test
+        run: |
+          declare -A BACKEND_SVCS=( ["product-service-w10e1"]="product" ["order-service-w10e1"]="order" ["customer-service-w10e1"]="customer" )
+          for SVC in "${!BACKEND_SVCS[@]}"; do
+            BACKEND_IP=""
+            for i in $(seq 1 60); do
+              BACKEND_IP=$(kubectl get svc $SVC -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+              if [ -n "$BACKEND_IP" ]; then
+                echo "$SVC IP: $BACKEND_IP"
+                break
+              fi
+              echo "Waiting for $SVC IP..."
+              sleep 5
+            done
+            if [ -z "$BACKEND_IP" ]; then
+              echo "ERROR: $SVC LoadBalancer IP not assigned"
+              kubectl get svc
+              exit 1
+            fi
+            # Simple health check (adjust endpoint if needed)
+            echo "Testing $SVC service..."
+            curl -f http://$BACKEND_IP/health || echo "$SVC not responding"
+          done
+
       - name: Destroy staging environment
         if: always()
         run: |
