@@ -1,0 +1,57 @@
+# week10/k8s/customer-service.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: customer-service-w10e1
+  labels:
+    app: customer-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: customer-service
+  template:
+    metadata:
+      labels:
+        app: customer-service
+    spec:
+      containers:
+      - name: customer-service-container
+        image: sit722week10acr.azurecr.io/customer_service:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+        env:
+        - name: POSTGRES_HOST
+          value: customer-db-service-w10e1
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: ecomm-config-w10e1
+              key: CUSTOMERS_DB_NAME
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: ecomm-secrets-w10e1
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: ecomm-secrets-w10e1
+              key: POSTGRES_PASSWORD
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: customer-service-w10e1
+  labels:
+    app: customer-service
+spec:
+  selector:
+    app: customer-service
+  ports:
+    - protocol: TCP
+      port: 8002
+      targetPort: 8000
+  type: LoadBalancer

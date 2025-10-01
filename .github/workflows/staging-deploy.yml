@@ -1,0 +1,216 @@
+name: Staging Deploy
+
+on:
+  workflow_call:
+    secrets:
+      AZURE_CREDENTIALS:
+        required: true
+      AZURE_CONTAINER_REGISTRY:
+        required: true
+      AZURE_CONTAINER_NAME:
+        required: true
+      AKS_CLUSTER_STAGING:
+        required: true
+      RESOURCE_GROUP:
+        required: true
+
+env:
+  ACR_LOGIN_SERVER: ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+  IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}
+
+jobs:
+  staging:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          enable-AzPSSession: true
+
+      - name: Set Kubernetes context (get AKS credentials)
+        run: |
+          az aks get-credentials --resource-group ${{ secrets.RESOURCE_GROUP }} \
+                                 --name ${{ secrets.AKS_CLUSTER_STAGING }} \
+                                 --overwrite-existing
+
+      - name: Attach ACR
+        run: |
+          az aks update --name ${{ secrets.AKS_CLUSTER_STAGING }} \
+                        --resource-group ${{ secrets.RESOURCE_GROUP }} \
+                        --attach-acr ${{ secrets.AZURE_CONTAINER_NAME }}
+
+      - name: Deploy Backend Infrastructure (DBs, ConfigMaps, Secrets)
+        run: |
+          cd k8s/
+          kubectl apply -f configmaps.yaml
+          kubectl apply -f secrets.yaml
+          kubectl apply -f product-db.yaml
+          kubectl apply -f order-db.yaml
+          kubectl apply -f customer-db.yaml
+
+      - name: Deploy Backend Microservices
+        run: |
+          cd k8s/
+          kubectl apply -f product-service.yaml
+          kubectl apply -f order-service.yaml
+          kubectl apply -f customer-service.yaml
+
+      - name: Wait for Backend LoadBalancer IPs and set env
+        id: backend_ips
+        run: |
+          declare -A BACKEND_SVCS=( 
+            ["product-service-w10e1"]="PRODUCT_API_URL" 
+            ["order-service-w10e1"]="ORDER_API_URL" 
+            ["customer-service-w10e1"]="CUSTOMER_API_URL" 
+          )
+
+          for SVC in "${!BACKEND_SVCS[@]}"; do
+            echo "Waiting for $SVC external IP..."
+            for i in $(seq 1 60); do
+              BACKEND_IP=$(kubectl get svc $SVC -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+              PORT=$(kubectl get svc $SVC -o jsonpath='{.spec.ports[0].port}' 2>/dev/null || echo "")
+              if [ -n "$BACKEND_IP" ] && [ -n "$PORT" ]; then
+                echo "Found $SVC -> $BACKEND_IP:$PORT"
+                echo "${BACKEND_SVCS[$SVC]}=http://$BACKEND_IP:$PORT" >> $GITHUB_ENV
+                break
+              fi
+              echo "Retrying $SVC... waiting 5s"
+              sleep 5
+            done
+
+            if [ -z "$BACKEND_IP" ] || [ -z "$PORT" ]; then
+              echo "ERROR: $SVC LoadBalancer IP or port not assigned"
+              exit 1
+            fi
+          done
+
+      - name: Inject Backend API URLs into frontend/main.js
+        run: |
+          echo "Injecting backend API URLs into frontend/main.js"
+          sed -i "s|_PRODUCT_API_URL_|${PRODUCT_API_URL}|g" frontend/main.js
+          sed -i "s|_ORDER_API_URL_|${ORDER_API_URL}|g" frontend/main.js
+          sed -i "s|_CUSTOMER_API_URL_|${CUSTOMER_API_URL}|g" frontend/main.js
+
+      - name: Login to ACR
+        run: az acr login --name ${{ env.ACR_LOGIN_SERVER }}
+
+      - name: Build & Push frontend
+        run: |
+          docker build -t ${{ env.ACR_LOGIN_SERVER }}/frontend:${{ env.IMAGE_TAG }} ./frontend/
+          docker tag   ${{ env.ACR_LOGIN_SERVER }}/frontend:${{ env.IMAGE_TAG }} ${{ env.ACR_LOGIN_SERVER }}/frontend:latest
+          docker push ${{ env.ACR_LOGIN_SERVER }}/frontend:${{ env.IMAGE_TAG }}
+          docker push ${{ env.ACR_LOGIN_SERVER }}/frontend:latest
+
+      - name: Deploy Frontend Service
+        run: |
+          cd k8s/
+          kubectl apply -f frontend.yaml
+
+      - name: Wait for all pods to be ready (up to 3 minutes)
+        run: |
+          kubectl wait --for=condition=ready pod --all --timeout=180s
+          kubectl get pods -o wide
+
+      - name: Get frontend external IP and run simple acceptance test
+        id: acceptance
+        run: |
+          FRONT_SVC="frontend-w10e1"
+          for i in $(seq 1 60); do
+            IP=$(kubectl get svc $FRONT_SVC -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+            if [ -n "$IP" ]; then
+              echo "Frontend IP: $IP"
+              break
+            fi
+            sleep 5
+          done
+
+          if [ -z "$IP" ]; then
+            echo "ERROR: frontend LoadBalancer IP not assigned"
+            kubectl get svc
+            exit 1
+          fi
+          echo "FRONTEND_IP=$IP" >> $GITHUB_ENV
+          echo "Testing frontend service..."
+          curl -f http://$FRONTEND_IP || echo "Frontend not responding"
+
+      - name: Backend Services Acceptance Test
+        run: |
+          declare -A BACKEND_SVCS=( 
+            ["product-service-w10e1"]="products" 
+            ["order-service-w10e1"]="orders" 
+            ["customer-service-w10e1"]="customers" 
+          )
+
+          for SVC in "${!BACKEND_SVCS[@]}"; do
+            echo "Checking $SVC..."
+            for i in $(seq 1 60); do
+              BACKEND_IP=$(kubectl get svc $SVC -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+              PORT=$(kubectl get svc $SVC -o jsonpath='{.spec.ports[0].port}' 2>/dev/null || echo "")
+              if [ -n "$BACKEND_IP" ] && [ -n "$PORT" ]; then
+                break
+              fi
+              echo "Waiting for $SVC LoadBalancer IP..."
+              sleep 5
+            done
+
+            if [ -z "$BACKEND_IP" ] || [ -z "$PORT" ]; then
+              echo "ERROR: $SVC LoadBalancer IP not assigned"
+              exit 1
+            fi
+
+            ENDPOINT=http://$BACKEND_IP:$PORT/${BACKEND_SVCS[$SVC]}/
+            echo "Testing $SVC service at $ENDPOINT"
+
+            # Retry loop
+            for j in $(seq 1 30); do
+              RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" $ENDPOINT || echo "")
+              if [ "$RESPONSE" == "200" ]; then
+                echo "$SVC responded OK"
+                break
+              fi
+              echo "Waiting for $SVC to respond..."
+              sleep 5
+            done
+
+            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" $ENDPOINT || echo "")
+            if [ "$RESPONSE" != "200" ]; then
+              echo "ERROR: $SVC did not respond"
+              exit 1
+            fi
+
+            # Health check
+            HEALTH_URL=http://$BACKEND_IP:$PORT/health
+            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" $HEALTH_URL || echo "")
+            if [ "$RESPONSE" != "200" ]; then
+              echo "ERROR: $SVC health endpoint not OK"
+              exit 1
+            fi
+          done
+
+
+      - name: Destroy staging environment
+        if: always()
+        run: |
+          echo "Deleting staging namespace resources..."
+          cd k8s/
+          # Delete backend services
+          kubectl delete -f product-service.yaml || true
+          kubectl delete -f order-service.yaml || true
+          kubectl delete -f customer-service.yaml || true
+
+          # Delete frontend
+          kubectl delete -f frontend.yaml || true
+
+          # Delete DBs, ConfigMaps, Secrets
+          kubectl delete -f product-db.yaml || true
+          kubectl delete -f order-db.yaml || true
+          kubectl delete -f customer-db.yaml || true
+          kubectl delete -f configmaps.yaml || true
+          kubectl delete -f secrets.yaml || true
+
+          echo "Staging environment destroyed."

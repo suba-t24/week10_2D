@@ -26,7 +26,7 @@ logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
 logging.getLogger("uvicorn.error").setLevel(logging.INFO)
 
 
-PRODUCT_SERVICE_URL = os.getenv("PRODUCT_SERVICE_URL", "http://localhost:8000")
+PRODUCT_SERVICE_URL = os.getenv("PRODUCT_SERVICE_URL", "http://product-service-w10e1:8000")
 logger.info(
     f"Order Service: Configured to communicate with Product Service at: {PRODUCT_SERVICE_URL}"
 )
