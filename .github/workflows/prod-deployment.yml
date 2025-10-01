@@ -1,4 +1,4 @@
-name: Prod Deploy - on main
+name: Prod Deploy
 
 on:
   push:
@@ -6,141 +6,52 @@ on:
       - main
 
 env:
-  ACR_LOGIN_SERVER: ${{ secrets.AZURE_CONTAINER_REGISTRY }}
   IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}
 
 jobs:
-  prod:
+  deploy:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
 
-      - name: Log in to Azure
-        uses: azure/login@v1
+      - name: Azure Login
+        uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
-          enable-AzPSSession: true
 
-      - name: Set Kubernetes context (get AKS credentials)
+      - name: Set AKS context
         run: |
-          az aks get-credentials --resource-group ${{ secrets.RESOURCE_GROUP }} \
-                                 --name ${{ secrets.AKS_CLUSTER_PROD }} \
-                                 --overwrite-existing
+          az aks get-credentials \
+            --resource-group sit722week10-rg \
+            --name sit722week10-prod \
+            --overwrite-existing
 
-      - name: Attach ACR
+      - name: Get backend LoadBalancer IPs
+        id: get-ips
         run: |
-          az aks update --name ${{ secrets.AKS_CLUSTER_PROD }} \
-                        --resource-group ${{ secrets.RESOURCE_GROUP }} \
-                        --attach-acr ${{ secrets.AZURE_CONTAINER_NAME }}
+          PRODUCT_IP=$(kubectl get svc product-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          ORDER_IP=$(kubectl get svc order-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          CUSTOMER_IP=$(kubectl get svc customer-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
 
-      - name: Deploy Backend Infrastructure (DBs, ConfigMaps, Secrets)
+          echo "PRODUCT_IP=$PRODUCT_IP" >> $GITHUB_ENV
+          echo "ORDER_IP=$ORDER_IP" >> $GITHUB_ENV
+          echo "CUSTOMER_IP=$CUSTOMER_IP" >> $GITHUB_ENV
+
+      - name: Inject backend IPs into frontend main.js
         run: |
-          cd k8s/
-          kubectl apply -f configmaps.yaml
-          kubectl apply -f secrets.yaml
-          kubectl apply -f product-db.yaml
-          kubectl apply -f order-db.yaml
-          kubectl apply -f customer-db.yaml
+          sed -i "s|const PRODUCT_API_BASE_URL = ''|const PRODUCT_API_BASE_URL = 'http://$PRODUCT_IP:5001'|" frontend/main.js
+          sed -i "s|const ORDER_API_BASE_URL = ''|const ORDER_API_BASE_URL = 'http://$ORDER_IP:5002'|" frontend/main.js
+          sed -i "s|const CUSTOMER_API_BASE_URL = ''|const CUSTOMER_API_BASE_URL = 'http://$CUSTOMER_IP:5003'|" frontend/main.js
 
-      - name: Deploy Backend Microservices (with image tag)
+      - name: Build and Push Frontend Image
         run: |
-          cd k8s/
-          kubectl set image deployment/product-service product=${{ env.ACR_LOGIN_SERVER }}/product:${{ env.IMAGE_TAG }} || true
-          kubectl set image deployment/order-service order=${{ env.ACR_LOGIN_SERVER }}/order:${{ env.IMAGE_TAG }} || true
-          kubectl set image deployment/customer-service customer=${{ env.ACR_LOGIN_SERVER }}/customer:${{ env.IMAGE_TAG }} || true
-          kubectl apply -f product-service.yaml
-          kubectl apply -f order-service.yaml
-          kubectl apply -f customer-service.yaml
+          docker build -t ${{ secrets.ACR_LOGIN_SERVER }}/frontend:${{ env.IMAGE_TAG }} frontend
+          echo ${{ secrets.ACR_PASSWORD }} | docker login ${{ secrets.ACR_LOGIN_SERVER }} -u ${{ secrets.ACR_USERNAME }} --password-stdin
+          docker push ${{ secrets.ACR_LOGIN_SERVER }}/frontend:${{ env.IMAGE_TAG }}
 
-      - name: Deploy Frontend Service (with image tag)
+      - name: Deploy manifests
         run: |
-          cd k8s/
-          kubectl set image deployment/frontend frontend=${{ env.ACR_LOGIN_SERVER }}/frontend:${{ env.IMAGE_TAG }} || true
-          kubectl apply -f frontend.yaml
-
-      - name: Wait for all pods to be ready (up to 3 minutes)
-        run: |
-          kubectl wait --for=condition=ready pod --all --timeout=180s
-          kubectl get pods -o wide
-
-      - name: Get frontend external IP and simple acceptance check
-        id: acceptance
-        run: |
-          FRONT_SVC="frontend-w10e1"
-          for i in $(seq 1 60); do
-            IP=$(kubectl get svc $FRONT_SVC -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
-            if [ -n "$IP" ]; then
-              echo "Frontend IP: $IP"
-              break
-            fi
-            echo "Waiting for frontend LoadBalancer..."
-            sleep 5
-          done
-
-          if [ -z "$IP" ]; then
-            echo "ERROR: frontend LoadBalancer IP not assigned"
-            kubectl get svc
-            exit 1
-          fi
-          echo "FRONTEND_IP=$IP" >> $GITHUB_ENV
-          echo "Testing frontend service..."
-          curl -f http://$IP || (echo "Frontend not responding" && exit 1)
-
-      - name: Backend Services Acceptance Test
-        run: |
-          declare -A BACKEND_SVCS=( 
-            ["product-service-w10e1"]="products" 
-            ["order-service-w10e1"]="orders" 
-            ["customer-service-w10e1"]="customers" 
-          )
-
-          for SVC in "${!BACKEND_SVCS[@]}"; do
-            echo "Checking $SVC..."
-            for i in $(seq 1 60); do
-              BACKEND_IP=$(kubectl get svc $SVC -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
-              PORT=$(kubectl get svc $SVC -o jsonpath='{.spec.ports[0].port}' 2>/dev/null || echo "")
-              if [ -n "$BACKEND_IP" ] && [ -n "$PORT" ]; then
-                break
-              fi
-              echo "Waiting for $SVC LoadBalancer IP..."
-              sleep 5
-            done
-
-            if [ -z "$BACKEND_IP" ] || [ -z "$PORT" ]; then
-              echo "ERROR: $SVC LoadBalancer IP not assigned"
-              exit 1
-            fi
-
-            ENDPOINT=http://$BACKEND_IP:$PORT/${BACKEND_SVCS[$SVC]}/
-            echo "Testing $SVC service at $ENDPOINT"
-
-            # Retry loop
-            for j in $(seq 1 30); do
-              RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" $ENDPOINT || echo "")
-              if [ "$RESPONSE" == "200" ]; then
-                echo "$SVC responded OK"
-                break
-              fi
-              echo "Waiting for $SVC to respond..."
-              sleep 5
-            done
-
-            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" $ENDPOINT || echo "")
-            if [ "$RESPONSE" != "200" ]; then
-              echo "ERROR: $SVC did not respond properly"
-              exit 1
-            fi
-
-            # Health check
-            HEALTH_URL=http://$BACKEND_IP:$PORT/health
-            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" $HEALTH_URL || echo "")
-            if [ "$RESPONSE" != "200" ]; then
-              echo "ERROR: $SVC health endpoint not OK"
-              exit 1
-            fi
-          done
-
-      - name: Logout from Azure
-        run: az logout
+          kubectl set image deployment/frontend frontend=${{ secrets.ACR_LOGIN_SERVER }}/frontend:${{ env.IMAGE_TAG }} -n prod
+          kubectl rollout status deployment/frontend -n prod
