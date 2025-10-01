@@ -102,8 +102,8 @@ jobs:
         run: |
           cd k8s/
           kubectl apply -f frontend.yaml
-          kubectl set image deployment/frontend frontend=${{ env.ACR_LOGIN_SERVER }}/frontend:${{ env.IMAGE_TAG }}
-          kubectl rollout status deployment/frontend
+          kubectl set image deployment/frontend-w10e1 frontend-container=${{ env.ACR_LOGIN_SERVER }}/frontend:${{ env.IMAGE_TAG }}
+          kubectl rollout status deployment/frontend-w10e1
 
       - name: Wait for all pods to be ready (up to 3 minutes)
         run: |
