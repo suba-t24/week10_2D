@@ -5,6 +5,10 @@ on:
     branches:
       - main
 
+env:
+  ACR_LOGIN_SERVER: ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+  IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}
+
 jobs:
   prod:
     runs-on: ubuntu-latest
@@ -29,7 +33,7 @@ jobs:
         run: |
           az aks update --name ${{ secrets.AKS_CLUSTER_PROD }} \
                         --resource-group ${{ secrets.RESOURCE_GROUP }} \
-                        --attach-acr ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+                        --attach-acr ${{ secrets.AZURE_CONTAINER_NAME }}
 
       - name: Deploy Backend Infrastructure (DBs, ConfigMaps, Secrets)
         run: |
@@ -40,30 +44,25 @@ jobs:
           kubectl apply -f order-db.yaml
           kubectl apply -f customer-db.yaml
 
-      - name: Deploy Backend Microservices
+      - name: Deploy Backend Microservices (with image tag)
         run: |
           cd k8s/
+          kubectl set image deployment/product-service product=${{ env.ACR_LOGIN_SERVER }}/product:${{ env.IMAGE_TAG }} || true
+          kubectl set image deployment/order-service order=${{ env.ACR_LOGIN_SERVER }}/order:${{ env.IMAGE_TAG }} || true
+          kubectl set image deployment/customer-service customer=${{ env.ACR_LOGIN_SERVER }}/customer:${{ env.IMAGE_TAG }} || true
           kubectl apply -f product-service.yaml
           kubectl apply -f order-service.yaml
           kubectl apply -f customer-service.yaml
 
-      - name: Deploy Frontend Service
+      - name: Deploy Frontend Service (with image tag)
         run: |
           cd k8s/
+          kubectl set image deployment/frontend frontend=${{ env.ACR_LOGIN_SERVER }}/frontend:${{ env.IMAGE_TAG }} || true
           kubectl apply -f frontend.yaml
 
       - name: Wait for all pods to be ready (up to 3 minutes)
         run: |
-          for i in $(seq 1 36); do
-            NOTREADY=$(kubectl get pods --no-headers | grep -v Running || true)
-            if [ -z "$NOTREADY" ]; then
-              echo "All pods running"
-              break
-            fi
-            echo "Waiting for pods to be ready..."
-            kubectl get pods --no-headers
-            sleep 5
-          done
+          kubectl wait --for=condition=ready pod --all --timeout=180s
           kubectl get pods -o wide
 
       - name: Get frontend external IP and simple acceptance check
@@ -76,6 +75,7 @@ jobs:
               echo "Frontend IP: $IP"
               break
             fi
+            echo "Waiting for frontend LoadBalancer..."
             sleep 5
           done
 
@@ -85,6 +85,62 @@ jobs:
             exit 1
           fi
           echo "FRONTEND_IP=$IP" >> $GITHUB_ENV
+          echo "Testing frontend service..."
+          curl -f http://$IP || (echo "Frontend not responding" && exit 1)
+
+      - name: Backend Services Acceptance Test
+        run: |
+          declare -A BACKEND_SVCS=( 
+            ["product-service-w10e1"]="products" 
+            ["order-service-w10e1"]="orders" 
+            ["customer-service-w10e1"]="customers" 
+          )
+
+          for SVC in "${!BACKEND_SVCS[@]}"; do
+            echo "Checking $SVC..."
+            for i in $(seq 1 60); do
+              BACKEND_IP=$(kubectl get svc $SVC -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+              PORT=$(kubectl get svc $SVC -o jsonpath='{.spec.ports[0].port}' 2>/dev/null || echo "")
+              if [ -n "$BACKEND_IP" ] && [ -n "$PORT" ]; then
+                break
+              fi
+              echo "Waiting for $SVC LoadBalancer IP..."
+              sleep 5
+            done
+
+            if [ -z "$BACKEND_IP" ] || [ -z "$PORT" ]; then
+              echo "ERROR: $SVC LoadBalancer IP not assigned"
+              exit 1
+            fi
+
+            ENDPOINT=http://$BACKEND_IP:$PORT/${BACKEND_SVCS[$SVC]}/
+            echo "Testing $SVC service at $ENDPOINT"
+
+            # Retry loop
+            for j in $(seq 1 30); do
+              RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" $ENDPOINT || echo "")
+              if [ "$RESPONSE" == "200" ]; then
+                echo "$SVC responded OK"
+                break
+              fi
+              echo "Waiting for $SVC to respond..."
+              sleep 5
+            done
+
+            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" $ENDPOINT || echo "")
+            if [ "$RESPONSE" != "200" ]; then
+              echo "ERROR: $SVC did not respond properly"
+              exit 1
+            fi
+
+            # Health check
+            HEALTH_URL=http://$BACKEND_IP:$PORT/health
+            RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" $HEALTH_URL || echo "")
+            if [ "$RESPONSE" != "200" ]; then
+              echo "ERROR: $SVC health endpoint not OK"
+              exit 1
+            fi
+          done
 
       - name: Logout from Azure
         run: az logout
